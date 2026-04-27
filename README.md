@@ -138,6 +138,13 @@ worth the extra setup when:
 For straight terminal chat, Ollama is honestly easier. This repo is built for
 the cases above.
 
+## Support
+
+If this is useful and you'd like to support more work like it:
+
+- ☕ **Patreon** — [patreon.com/AndersBjarby](https://www.patreon.com/AndersBjarby)
+- 📘 **Book** — [The Evolution of AI Agentic Thinking](https://anders.bjarby.com/the-evolution-of-ai-agentic-thinking/)
+
 ## License
 
 MIT — see `LICENSE`.
