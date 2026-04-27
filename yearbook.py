@@ -134,7 +134,8 @@ def split_by_time_gap(photos: list, gap_hours: float = 6.0) -> list[list]:
 
 
 def detect_trips(photos: list, home: tuple[float, float] | None,
-                 min_dist_km: float = 50.0) -> list[Cluster]:
+                 min_dist_km: float = 50.0,
+                 min_trip_size: int = 8) -> list[Cluster]:
     if not home:
         return []
     away = [p for p in photos
@@ -143,7 +144,7 @@ def detect_trips(photos: list, home: tuple[float, float] | None,
             and haversine_km(p.location, home) >= min_dist_km]
     trip_clusters = []
     for group in split_by_time_gap(away, gap_hours=24):
-        if len(group) < 5:
+        if len(group) < min_trip_size:
             continue
         # Try to label with most common place name
         names = Counter(p.place.name for p in group if p.place and p.place.name)
@@ -182,10 +183,27 @@ class Buckets:
     everyday: list = field(default_factory=list)
 
 
-def bucket_photos(photos: list, holiday_map: dict[date, str]) -> Buckets:
+def is_yearbook_worthy(p, allow_videos: bool, allow_screenshots: bool,
+                       allow_no_camera: bool) -> bool:
+    """Filter out content that doesn't belong in a printable yearbook:
+    videos (don't render in books), screenshots (Pokemon/UI captures),
+    and photos with no camera info (downloaded images, web saves)."""
+    if getattr(p, "ismovie", False) and not allow_videos:
+        return False
+    if getattr(p, "screenshot", False) and not allow_screenshots:
+        return False
+    if not allow_no_camera:
+        cam = p.exif_info.camera_make if p.exif_info else None
+        if not cam:
+            return False
+    return True
+
+
+def bucket_photos(photos: list, holiday_map: dict[date, str],
+                  min_trip_size: int = 8) -> Buckets:
     home = home_centroid(photos)
     b = Buckets()
-    b.trips = detect_trips(photos, home)
+    b.trips = detect_trips(photos, home, min_trip_size=min_trip_size)
     trip_uuids = {p.uuid for c in b.trips for p in c.photos}
 
     non_trip = [p for p in photos if p.uuid not in trip_uuids]
@@ -522,6 +540,18 @@ def main():
     ap.add_argument("--holidays", default="se",
                     help="Country codes for holiday detection, comma-separated. "
                          "Examples: se, us, se,us. Use 'none' to disable.")
+    ap.add_argument("--min-trip-size", type=int, default=8,
+                    help="Minimum photos away-from-home for something to "
+                         "count as a 'trip'. Lower → more day-excursions "
+                         "and brief outings get included. Default: 8")
+    ap.add_argument("--include-videos", action="store_true",
+                    help="Include movie clips (excluded by default — they "
+                         "don't render in printed books).")
+    ap.add_argument("--include-screenshots", action="store_true",
+                    help="Include screenshots (excluded by default).")
+    ap.add_argument("--include-no-camera", action="store_true",
+                    help="Include photos lacking EXIF camera info: "
+                         "downloads, web saves, etc. (excluded by default).")
     ap.add_argument("--max-per-cluster", type=int, default=6,
                     help="Cap on how many photos one trip/event/holiday can "
                          "contribute. Prevents a single 200-photo wedding "
@@ -540,9 +570,19 @@ def main():
 
     print("Reading Photos library...", flush=True)
     db = osxphotos.PhotosDB()
-    photos = db.photos(from_date=start, to_date=end)
-    if not photos:
+    raw_photos = db.photos(from_date=start, to_date=end)
+    if not raw_photos:
         print("No photos in range."); return
+
+    photos = [
+        p for p in raw_photos
+        if is_yearbook_worthy(p, args.include_videos,
+                              args.include_screenshots, args.include_no_camera)
+    ]
+    dropped = len(raw_photos) - len(photos)
+    if dropped:
+        print(f"  filtered out {dropped} videos / screenshots / no-camera "
+              f"({len(photos)} remain)")
 
     # Holidays
     if args.holidays.lower() == "none":
@@ -553,7 +593,7 @@ def main():
         holiday_map = expand_holidays(codes, years)
 
     # Bucket + plan
-    buckets = bucket_photos(photos, holiday_map)
+    buckets = bucket_photos(photos, holiday_map, min_trip_size=args.min_trip_size)
     print_discovery(photos, buckets)
     targets = allocate(buckets, args.count)
     print_plan(targets, buckets)
