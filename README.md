@@ -75,14 +75,34 @@ In interactive mode: `/reset` clears history, `Ctrl-D` exits.
 3. Run:
 
 ```bash
-gemma-photos --dry-run        # see what it would write, without touching anything
-gemma-photos                   # set caption + merge keywords
-gemma-photos --no-caption      # only keywords
-gemma-photos --no-keywords     # only caption
-gemma-photos --replace-keywords  # overwrite existing keywords (default merges)
+gemma-photos --dry-run             # see what it would write, without touching anything
+gemma-photos                        # set caption + merge keywords
+gemma-photos --no-caption           # only keywords
+gemma-photos --no-keywords          # only caption
+gemma-photos --replace-keywords     # overwrite existing keywords (default merges)
+gemma-photos --explicit-context     # weave date, place, and named people into the caption
+gemma-photos --no-context           # ignore Photos metadata entirely
 gemma-photos --style "poetic, two-line haiku"
 gemma-photos --prompt "FULL CUSTOM PROMPT — must still emit CAPTION: and KEYWORDS: lines"
 ```
+
+### Photos metadata as context
+
+By default `gemma-photos` reads each photo's date, GPS-derived place name, and
+any **named** faces from your Photos library and feeds them into the prompt as
+soft context. The model uses them as tone hints — e.g. it'll prefer the
+keyword `park` over `leaves` if the photo was taken in a park.
+
+`--explicit-context` flips this from soft to hard: the model is told to weave
+the place, date, and tagged person names directly into the caption text. The
+difference for the same photo:
+
+> **default:** Glad man leker med en ring bland grönska utomhus.
+> **--explicit-context:** Anders ler vid Sofiero Park i Helsingborg under en solig eftermiddag i maj 2023.
+
+Person names only get used if you've actually labelled the faces in Photos
+(otherwise osxphotos returns `_UNKNOWN_`, which we filter out). `--no-context`
+disables the whole thing.
 
 The first run triggers a macOS dialog asking for permission to control Photos —
 approve it.

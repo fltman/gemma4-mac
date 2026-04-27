@@ -79,6 +79,26 @@ _RESOLVE = '''
 '''
 
 
+def build_context_block(photo) -> str | None:
+    """Compose a 'Kontext'-block from Photos metadata, or return None.
+
+    Includes date/time, reverse-geocoded place name, and tagged person names.
+    Untagged faces (osxphotos returns '_UNKNOWN_') are skipped — they'd just
+    confuse the model.
+    """
+    parts = []
+    if photo.date:
+        parts.append(f"Datum: {photo.date.strftime('%Y-%m-%d %H:%M')}")
+    place = photo.place
+    if place and getattr(place, "name", None):
+        parts.append(f"Plats: {place.name}")
+    if photo.persons:
+        named = [p for p in photo.persons if p and not p.startswith("_")]
+        if named:
+            parts.append(f"Personer i bilden: {', '.join(named)}")
+    return "\n".join(parts) if parts else None
+
+
 def find_local_path(db, photo_id: str) -> Path:
     """Resolve a Photos selection id to a locally-available image.
 
@@ -156,11 +176,30 @@ def parse_response(text: str) -> tuple[str, list[str]]:
     return caption, keywords
 
 
-def analyze_image(model, processor, config, image_path: Path, prompt: str) -> tuple[str, list[str]]:
+def analyze_image(
+    model, processor, config, image_path: Path, prompt: str,
+    context: str | None = None, explicit_context: bool = False,
+) -> tuple[str, list[str]]:
     from mlx_vlm import generate
     from mlx_vlm.prompt_utils import apply_chat_template
 
-    formatted = apply_chat_template(processor, config, prompt, num_images=1)
+    if context and explicit_context:
+        full_prompt = (
+            "Kontext för bilden:\n"
+            f"{context}\n\n"
+            "Väv in plats, datum (eller månad/år) och eventuella personnamn "
+            "från kontexten naturligt i CAPTION. Använd ENDAST de namn som "
+            "är listade ovan — beskriv andra personer anonymt.\n\n"
+            f"{prompt}"
+        )
+    elif context:
+        full_prompt = (
+            "Kontext för bilden (använd endast om relevant för det du ser):\n"
+            f"{context}\n\n{prompt}"
+        )
+    else:
+        full_prompt = prompt
+    formatted = apply_chat_template(processor, config, full_prompt, num_images=1)
     result = generate(
         model, processor, formatted,
         image=[str(image_path)],
@@ -185,6 +224,13 @@ def main():
     ap.add_argument("--prompt", default=None,
                     help="Full prompt override. Must still elicit "
                          "'CAPTION:' and 'KEYWORDS:' lines.")
+    ap.add_argument("--no-context", action="store_true",
+                    help="Don't inject Photos metadata (date, place, named "
+                         "people) into the prompt. Default: include it.")
+    ap.add_argument("--explicit-context", action="store_true",
+                    help="Force the model to weave date, place, and named "
+                         "people into the caption text (not just use them as "
+                         "tone hints). Implies context is on.")
     args = ap.parse_args()
 
     prompt = args.prompt if args.prompt else build_prompt(args.style)
@@ -214,7 +260,15 @@ def main():
     for i, pid in enumerate(ids, 1):
         try:
             img = find_local_path(db, pid)
-            caption, keywords = analyze_image(model, processor, config, img, prompt)
+            context = None
+            if not args.no_context:
+                photo = db.get_photo(pid.split("/")[0])
+                if photo:
+                    context = build_context_block(photo)
+            caption, keywords = analyze_image(
+                model, processor, config, img, prompt,
+                context=context, explicit_context=args.explicit_context,
+            )
 
             lines = [f"  [{i}/{len(ids)}]"]
             if not args.no_caption and caption:
