@@ -51,7 +51,8 @@ note "Installing dependencies (a few minutes on first run)"
     "mlx-vlm" \
     "osxphotos" \
     "pillow-heif" \
-    "holidays"
+    "holidays" \
+    "imagehash"
 ok "Python dependencies installed"
 
 # ---- wrappers ----

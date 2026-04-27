@@ -24,6 +24,9 @@ from typing import Iterable
 
 import osxphotos
 import holidays as pyholidays
+import imagehash
+from PIL import Image
+from pathlib import Path as _Path
 
 
 # --------------------------------------------------------------------------
@@ -238,26 +241,59 @@ def quality(p) -> float:
     return overall - failure + 0.5 * curation + 0.2 * well_framed + 0.1 * sharply
 
 
-def dedup_burst(photos: list, window_seconds: int = 30) -> list:
-    """Within each <window_seconds> burst, keep only the highest-quality photo."""
-    if not photos:
-        return []
-    photos = sorted(photos, key=lambda p: p.date)
-    kept = [photos[0]]
-    for p in photos[1:]:
-        if (p.date - kept[-1].date).total_seconds() < window_seconds:
-            if quality(p) > quality(kept[-1]):
-                kept[-1] = p
-        else:
-            kept.append(p)
-    return kept
+_phash_cache: dict[str, imagehash.ImageHash | None] = {}
+_similarity_threshold: int = 12  # mutated by main() from CLI flag
 
 
-def select_top(photos: list, n: int) -> list:
+def phash_of(photo) -> imagehash.ImageHash | None:
+    """Compute (and cache) a perceptual hash from the smallest local derivative.
+
+    A small JPEG is enough — pHash internally downsamples to 8x8.
+    """
+    if photo.uuid in _phash_cache:
+        return _phash_cache[photo.uuid]
+    derivs = photo.path_derivatives or []
+    # Smallest derivative is usually last; use it for speed.
+    for d in reversed(derivs):
+        if d and _Path(d).exists():
+            try:
+                with Image.open(d) as img:
+                    h = imagehash.phash(img)
+                _phash_cache[photo.uuid] = h
+                return h
+            except Exception:
+                continue
+    _phash_cache[photo.uuid] = None
+    return None
+
+
+def select_top(photos: list, n: int,
+               similarity_threshold: int | None = None) -> list:
+    """Pick up to `n` photos by quality, skipping near-duplicates.
+
+    Two photos count as duplicates when their pHash hamming distance is below
+    `similarity_threshold` (out of 64). 12 catches passport-style burst shots
+    of the same scene; lower is more aggressive, higher is more permissive.
+    Photos without a usable derivative fall through without dedup.
+    """
     if n <= 0 or not photos:
         return []
-    deduped = dedup_burst(photos)
-    return sorted(deduped, key=quality, reverse=True)[:n]
+    threshold = similarity_threshold if similarity_threshold is not None else _similarity_threshold
+    sorted_by_q = sorted(photos, key=quality, reverse=True)
+    picked: list = []
+    picked_hashes: list = []
+    for p in sorted_by_q:
+        h = phash_of(p)
+        if h is not None and any(
+            ph is not None and (h - ph) < threshold
+            for ph in picked_hashes
+        ):
+            continue
+        picked.append(p)
+        picked_hashes.append(h)
+        if len(picked) >= n:
+            break
+    return picked
 
 
 # --------------------------------------------------------------------------
@@ -439,7 +475,8 @@ def pick_from_buckets(buckets: Buckets, targets: dict[str, int],
 
 def topup_to_budget(selected: list, all_in_range: list, target: int) -> list:
     """If max-per-cluster left us short of the budget, fill from the highest
-    -quality unselected photos in the date range."""
+    -quality unselected photos that aren't visually similar to anything
+    already picked."""
     if len(selected) >= target:
         return selected
     have = {p.uuid for p in selected}
@@ -447,7 +484,20 @@ def topup_to_budget(selected: list, all_in_range: list, target: int) -> list:
         (p for p in all_in_range if p.uuid not in have),
         key=quality, reverse=True,
     )
-    return selected + extras[: target - len(selected)]
+    out = list(selected)
+    out_hashes = [phash_of(p) for p in out]
+    for cand in extras:
+        if len(out) >= target:
+            break
+        h = phash_of(cand)
+        if h is not None and any(
+            ph is not None and (h - ph) < _similarity_threshold
+            for ph in out_hashes
+        ):
+            continue
+        out.append(cand)
+        out_hashes.append(h)
+    return out
 
 
 def named_persons(photo) -> list[str]:
@@ -552,6 +602,11 @@ def main():
     ap.add_argument("--include-no-camera", action="store_true",
                     help="Include photos lacking EXIF camera info: "
                          "downloads, web saves, etc. (excluded by default).")
+    ap.add_argument("--similarity-threshold", type=int, default=12,
+                    help="Visual similarity cutoff (pHash hamming distance, "
+                         "0–64). Photos within this distance of an already-"
+                         "picked one are skipped. Lower = stricter dedup. "
+                         "Default: 12")
     ap.add_argument("--max-per-cluster", type=int, default=6,
                     help="Cap on how many photos one trip/event/holiday can "
                          "contribute. Prevents a single 200-photo wedding "
@@ -564,6 +619,9 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="Show discovery + selection plan without creating an album")
     args = ap.parse_args()
+
+    global _similarity_threshold
+    _similarity_threshold = args.similarity_threshold
 
     start, end = parse_date_range(args)
     print(f"Range: {start.date()} – {end.date()}")
