@@ -282,6 +282,9 @@ def create_album_with(name: str, uuids: Iterable[str]) -> int:
     """Create a new top-level album in Photos and add given UUIDs. Returns count added."""
     safe_name = applescript_string(name)
     uuid_list = "{" + ", ".join(f'"{applescript_string(u)}"' for u in uuids) + "}"
+    # osxphotos exposes bare UUIDs ("BB76C4A3-…"), but Photos AppleScript ids
+    # include a per-asset suffix ("/L0/001", "/V0/…" for videos). `starts with`
+    # matches across both forms.
     script = f'''
     tell application "Photos"
         set newAlbum to make new album named "{safe_name}"
@@ -289,7 +292,7 @@ def create_album_with(name: str, uuids: Iterable[str]) -> int:
         repeat with targetId in {uuid_list}
             set found to {{}}
             try
-                set found to (every media item whose id is targetId)
+                set found to (every media item whose id starts with targetId)
             end try
             if (count of found) > 0 then
                 add found to newAlbum
