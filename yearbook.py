@@ -242,7 +242,7 @@ def quality(p) -> float:
 
 
 _phash_cache: dict[str, imagehash.ImageHash | None] = {}
-_similarity_threshold: int = 12  # mutated by main() from CLI flag
+_similarity_threshold: int = 14  # mutated by main() from CLI flag
 
 
 def phash_of(photo) -> imagehash.ImageHash | None:
@@ -473,22 +473,81 @@ def pick_from_buckets(buckets: Buckets, targets: dict[str, int],
     return final
 
 
-def topup_to_budget(selected: list, all_in_range: list, target: int) -> list:
-    """If max-per-cluster left us short of the budget, fill from the highest
-    -quality unselected photos that aren't visually similar to anything
-    already picked."""
+def scene_key(p) -> tuple:
+    """Coarse (date, ~1km) bucket for grouping photos into 'scenes'.
+    Photos lacking GPS are placed in singleton buckets (per-uuid)."""
+    date_key = p.date.date() if p.date else None
+    loc = p.location
+    if loc and loc[0] is not None and loc[1] is not None:
+        return (date_key, round(loc[0], 2), round(loc[1], 2))
+    return ("singleton", p.uuid)
+
+
+def scene_dedup(selected: list, keep_per_scene: int) -> list:
+    """Cap how many photos can come from the same (date, ~1km area).
+
+    A 4-hour passport-photo session at home is a single 'scene' even though
+    its photos vary slightly in pose/expression — pHash is too coarse to
+    catch this kind of repetition. Date+location bucketing reliably groups
+    them and lets us keep just the top N by quality.
+
+    Photos without GPS are placed in singleton groups (not deduped) so a
+    library of indoor shots without geotags isn't collapsed.
+    """
+    if keep_per_scene <= 0:
+        return selected
+    groups: dict = defaultdict(list)
+    for p in selected:
+        groups[scene_key(p)].append(p)
+    out: list = []
+    for g in groups.values():
+        out.extend(sorted(g, key=quality, reverse=True)[:keep_per_scene])
+    return out
+
+
+def global_dedup(selected: list, threshold: int) -> list:
+    """Drop near-duplicates from the whole selection.
+
+    pick_from_buckets only deduplicates within each bucket, so a portrait
+    series can survive by landing partially in 'events' and partially in
+    'everyday'. This pass walks the merged result in quality order and keeps
+    only photos that aren't too close to anything already kept.
+    """
+    out: list = []
+    out_hashes: list = []
+    for p in sorted(selected, key=quality, reverse=True):
+        h = phash_of(p)
+        if h is not None and any(
+            ph is not None and (h - ph) < threshold
+            for ph in out_hashes
+        ):
+            continue
+        out.append(p)
+        out_hashes.append(h)
+    return out
+
+
+def topup_to_budget(selected: list, all_in_range: list, target: int,
+                    keep_per_scene: int) -> list:
+    """Fill the selection up to `target` from the highest-quality remaining
+    photos, while respecting both pHash similarity and per-scene caps."""
     if len(selected) >= target:
         return selected
     have = {p.uuid for p in selected}
+    out = list(selected)
+    out_hashes = [phash_of(p) for p in out]
+    scene_counts: dict = defaultdict(int)
+    for p in out:
+        scene_counts[scene_key(p)] += 1
     extras = sorted(
         (p for p in all_in_range if p.uuid not in have),
         key=quality, reverse=True,
     )
-    out = list(selected)
-    out_hashes = [phash_of(p) for p in out]
     for cand in extras:
         if len(out) >= target:
             break
+        if keep_per_scene > 0 and scene_counts[scene_key(cand)] >= keep_per_scene:
+            continue
         h = phash_of(cand)
         if h is not None and any(
             ph is not None and (h - ph) < _similarity_threshold
@@ -497,6 +556,7 @@ def topup_to_budget(selected: list, all_in_range: list, target: int) -> list:
             continue
         out.append(cand)
         out_hashes.append(h)
+        scene_counts[scene_key(cand)] += 1
     return out
 
 
@@ -602,7 +662,13 @@ def main():
     ap.add_argument("--include-no-camera", action="store_true",
                     help="Include photos lacking EXIF camera info: "
                          "downloads, web saves, etc. (excluded by default).")
-    ap.add_argument("--similarity-threshold", type=int, default=12,
+    ap.add_argument("--keep-per-scene", type=int, default=2,
+                    help="Cap on photos from the same (date, ~1km area). "
+                         "Catches dense scenes that pHash misses (e.g. a "
+                         "passport-photo session: same wall, different "
+                         "expressions but visually distinct hashes). "
+                         "Default: 2")
+    ap.add_argument("--similarity-threshold", type=int, default=14,
                     help="Visual similarity cutoff (pHash hamming distance, "
                          "0–64). Photos within this distance of an already-"
                          "picked one are skipped. Lower = stricter dedup. "
@@ -658,7 +724,16 @@ def main():
 
     # Select
     selected = pick_from_buckets(buckets, targets, args.max_per_cluster)
-    selected = topup_to_budget(selected, photos, args.count)
+    before = len(selected)
+    selected = scene_dedup(selected, args.keep_per_scene)
+    if len(selected) < before:
+        print(f"\nScene dedup: trimmed {before - len(selected)} photos "
+              f"from same-day same-place groups.")
+    before = len(selected)
+    selected = global_dedup(selected, _similarity_threshold)
+    if len(selected) < before:
+        print(f"pHash dedup: removed {before - len(selected)} visually similar.")
+    selected = topup_to_budget(selected, photos, args.count, args.keep_per_scene)
     selected = trim_to_budget(selected, args.count)
     selected = rebalance_persons(selected, photos, args.count, args.person_balance)
     print(f"\nFinal selection: {len(selected)} photos")
