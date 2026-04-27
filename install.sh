@@ -45,12 +45,14 @@ note "Installing dependencies (a few minutes on first run)"
 # mlx-lm git main has the gemma4 model files; PyPI lags behind for new architectures.
 # osxphotos: read Photos library directly so iCloud-only items can be analysed.
 # pillow-heif: HEIC support for PIL (iPhone originals are HEIC by default).
+# holidays: country-aware holiday calendars for the yearbook curator.
 "$VENV/bin/pip" install --quiet --upgrade \
     "git+https://github.com/ml-explore/mlx-lm.git" \
     "mlx-vlm" \
     "osxphotos" \
-    "pillow-heif"
-ok "mlx-lm, mlx-vlm, osxphotos and pillow-heif installed"
+    "pillow-heif" \
+    "holidays"
+ok "Python dependencies installed"
 
 # ---- wrappers ----
 mkdir -p "$BINDIR"
@@ -62,7 +64,11 @@ cat > "$BINDIR/gemma-photos" <<EOF
 #!/usr/bin/env bash
 exec "$VENV/bin/python" "$REPO_DIR/photos_caption.py" "\$@"
 EOF
-chmod +x "$BINDIR/gemma" "$BINDIR/gemma-photos"
+cat > "$BINDIR/gemma-yearbook" <<EOF
+#!/usr/bin/env bash
+exec "$VENV/bin/python" "$REPO_DIR/yearbook.py" "\$@"
+EOF
+chmod +x "$BINDIR/gemma" "$BINDIR/gemma-photos" "$BINDIR/gemma-yearbook"
 ok "Wrappers written to $BINDIR"
 
 # ---- shell aliases (zsh only — macOS default since Catalina) ----
@@ -84,6 +90,7 @@ cat >> "$ZSHRC" <<EOF
 $START
 alias gemma='$BINDIR/gemma'
 alias gemma-photos='$BINDIR/gemma-photos'
+alias gemma-yearbook='$BINDIR/gemma-yearbook'
 $END
 EOF
 ok "Aliases added to ~/.zshrc"

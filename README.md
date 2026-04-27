@@ -16,6 +16,9 @@ gemma -a clip.mp3 "transcribe the audio"             # audio
 
 gemma-photos --dry-run                # caption + tag the current Photos.app selection
 gemma-photos --style "poetic, two lines"
+
+gemma-yearbook --year 2024 --count 100 --album "Året 2024"  # auto-curate a yearbook album
+gemma-yearbook --year 2024 --dry-run                         # show what would be picked
 ```
 
 `gemma-photos` exports each selected photo, asks Gemma for a Swedish caption +
@@ -85,6 +88,41 @@ gemma-photos --no-context           # ignore Photos metadata entirely
 gemma-photos --style "poetic, two-line haiku"
 gemma-photos --prompt "FULL CUSTOM PROMPT — must still emit CAPTION: and KEYWORDS: lines"
 ```
+
+## `gemma-yearbook` — auto-curate a year in photos
+
+Picks a balanced selection of photos from a date range and creates a new
+album in Photos.app. Uses **Apple's own per-photo aesthetic scores** (the
+same ones that drive the "Memories" feature, exposed via osxphotos) to rank
+candidates — no extra ML pass needed for quality, just for captioning.
+
+```bash
+gemma-yearbook --year 2024                              # default: 100 photos, album "Yearbook 2024"
+gemma-yearbook --year 2024 --count 50 --album "Best of '24"
+gemma-yearbook --from 2024-06-01 --to 2024-08-31         # custom date range
+gemma-yearbook --year 2024 --dry-run                     # report only, don't touch Photos
+gemma-yearbook --year 2024 --holidays se,us              # include US holidays too
+gemma-yearbook --year 2024 --holidays none               # ignore the holiday calendar
+```
+
+What happens:
+
+1. **Discovery** — reads all photos in the range, then groups them into:
+   - **Trips** (≥5 photos taken ≥50 km from your geographic median, in
+     bursts of >24h gaps)
+   - **Holidays** (matching dates from the `holidays` Python library plus
+     the day before for "eve" celebrations like Julafton)
+   - **Event clusters** (≥8 photos within ~4 hours, ≤18h total)
+   - **Everyday** (everything else)
+2. **Budget split** — defaults to 35% trips, 25% events, 20% holidays, 20%
+   everyday. Empty buckets redistribute to the rest.
+3. **Per-bucket ranking** — Apple's `score.overall - score.failure`, plus
+   bonuses for `well_framed_subject` and `sharply_focused_subject`. Within
+   each 30-second burst, only the top-scored photo survives.
+4. **Album** — creates a new top-level album in Photos and adds the picks.
+
+The discovery report prints up-front, so `--dry-run` lets you sanity-check
+the buckets and budget before committing.
 
 ### Photos metadata as context
 
