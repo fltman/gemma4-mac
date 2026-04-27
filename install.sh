@@ -43,10 +43,14 @@ ok "Virtualenv ready"
 note "Installing dependencies (a few minutes on first run)"
 "$VENV/bin/pip" install --quiet --upgrade pip
 # mlx-lm git main has the gemma4 model files; PyPI lags behind for new architectures.
+# osxphotos: read Photos library directly so iCloud-only items can be analysed.
+# pillow-heif: HEIC support for PIL (iPhone originals are HEIC by default).
 "$VENV/bin/pip" install --quiet --upgrade \
     "git+https://github.com/ml-explore/mlx-lm.git" \
-    "mlx-vlm"
-ok "mlx-lm and mlx-vlm installed"
+    "mlx-vlm" \
+    "osxphotos" \
+    "pillow-heif"
+ok "mlx-lm, mlx-vlm, osxphotos and pillow-heif installed"
 
 # ---- wrappers ----
 mkdir -p "$BINDIR"

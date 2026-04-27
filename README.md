@@ -91,6 +91,28 @@ approve it.
 falls back to a library-wide search by id if the selection has changed, but
 keeping it stable is safer.
 
+### Image source: previews, not originals
+
+`gemma-photos` reads the **local preview derivative** straight from the
+Photos library (via [osxphotos](https://github.com/RhetTbull/osxphotos))
+rather than asking Photos.app to export the original. Two reasons:
+
+1. **iCloud-only photos work.** With *Optimise Mac Storage* enabled, most
+   originals live in iCloud and aren't on disk — but the previews are. So
+   we can analyse cloud-only items without forcing slow downloads.
+2. **Originals add no value here.** Gemma's vision encoder resizes to ~768px
+   internally, so the difference between a 4032×3024 HEIC original and an
+   1080×1920 preview vanishes after preprocessing.
+
+Preview sizes are typically 720–1080px on the long edge for recent photos,
+sometimes as small as 480×360 for older library items. That's plenty for
+scene captions and keywords; for pixel-level detail you'd need to read the
+originals separately.
+
+If reading the Photos library fails with a permission error, grant **Full
+Disk Access** to your terminal: System Settings → Privacy & Security → Full
+Disk Access → add Terminal (or iTerm).
+
 ## Performance
 
 Measured on a MacBook Pro M5 (10-core, 16 GB RAM):

@@ -16,8 +16,14 @@ Flags:
 """
 import argparse
 import subprocess
-import tempfile
 from pathlib import Path
+
+# Register HEIF/HEIC support so PIL (used by mlx-vlm) can read iPhone originals.
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except ImportError:
+    pass
 
 REPO = "mlx-community/gemma-4-e4b-it-4bit"
 DEFAULT_STYLE = "kort beskrivande mening på svenska, max ~15 ord"
@@ -73,21 +79,27 @@ _RESOLVE = '''
 '''
 
 
-def export_photo(photo_id: str, dest_dir: Path) -> Path:
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    safe_id = applescript_string(photo_id)
-    script = f'''
-    tell application "Photos"
-        set targetId to "{safe_id}"
-        {_RESOLVE}
-        export {{p}} to (POSIX file "{dest_dir}")
-    end tell
-    '''
-    osa(script)
-    files = [f for f in dest_dir.iterdir() if f.is_file()]
-    if not files:
-        raise RuntimeError(f"no file exported for {photo_id}")
-    return files[0]
+def find_local_path(db, photo_id: str) -> Path:
+    """Resolve a Photos selection id to a locally-available image.
+
+    Prefer the largest preview derivative — always JPEG, present even for
+    iCloud-only photos, and uniformly sized (Gemma's vision encoder resizes
+    to ~768 internally so original-resolution gains nothing). Falls back to
+    edited/original masters only if no derivative exists.
+    """
+    uuid = photo_id.split("/")[0]  # strip "/L0/001" suffix
+    photo = db.get_photo(uuid)
+    if photo is None:
+        raise RuntimeError(f"photo not found in library: {uuid}")
+    for d in photo.path_derivatives or []:
+        if d and Path(d).exists():
+            return Path(d)
+    for candidate in (photo.path_edited, photo.path):
+        if candidate and Path(candidate).exists():
+            return Path(candidate)
+    raise RuntimeError(
+        f"no local image data for {uuid} — derivative may have been purged"
+    )
 
 
 def set_description(photo_id: str, text: str) -> None:
@@ -187,6 +199,11 @@ def main():
         return
     print(f"Bearbetar {len(ids)} bild(er){' (dry-run)' if args.dry_run else ''}…\n")
 
+    print("Läser Photos-bibliotek…", end=" ", flush=True)
+    import osxphotos
+    db = osxphotos.PhotosDB()
+    print(f"{len(db.photos())} bilder.")
+
     print("Laddar Gemma…", end=" ", flush=True)
     from mlx_vlm import load
     from mlx_vlm.utils import load_config
@@ -194,28 +211,25 @@ def main():
     config = load_config(REPO)
     print("klart.\n")
 
-    with tempfile.TemporaryDirectory(prefix="gemma-photos-") as tmp:
-        tmpd = Path(tmp)
-        for i, pid in enumerate(ids, 1):
-            sub = tmpd / f"img{i}"
-            try:
-                img = export_photo(pid, sub)
-                caption, keywords = analyze_image(model, processor, config, img, prompt)
+    for i, pid in enumerate(ids, 1):
+        try:
+            img = find_local_path(db, pid)
+            caption, keywords = analyze_image(model, processor, config, img, prompt)
 
-                lines = [f"  [{i}/{len(ids)}]"]
-                if not args.no_caption and caption:
-                    if not args.dry_run:
-                        set_description(pid, caption)
-                    lines.append(f"caption: {caption}")
-                if not args.no_keywords and keywords:
-                    if not args.dry_run:
-                        set_keywords(pid, keywords, merge=not args.replace_keywords)
-                    lines.append(f"keywords: {', '.join(keywords)}")
-                if len(lines) == 1:
-                    lines.append("(modellen svarade utan caption/keywords)")
-                print("\n    ".join(lines))
-            except Exception as e:
-                print(f"  [{i}/{len(ids)}] ✗ {e}")
+            lines = [f"  [{i}/{len(ids)}]"]
+            if not args.no_caption and caption:
+                if not args.dry_run:
+                    set_description(pid, caption)
+                lines.append(f"caption: {caption}")
+            if not args.no_keywords and keywords:
+                if not args.dry_run:
+                    set_keywords(pid, keywords, merge=not args.replace_keywords)
+                lines.append(f"keywords: {', '.join(keywords)}")
+            if len(lines) == 1:
+                lines.append("(modellen svarade utan caption/keywords)")
+            print("\n    ".join(lines))
+        except Exception as e:
+            print(f"  [{i}/{len(ids)}] ✗ {e}")
 
     print("\nKlart.")
 
