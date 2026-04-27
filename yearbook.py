@@ -360,22 +360,23 @@ def print_plan(targets: dict[str, int], buckets: Buckets):
 # Selection per bucket
 # --------------------------------------------------------------------------
 
-def pick_from_buckets(buckets: Buckets, targets: dict[str, int]) -> list:
+def pick_from_buckets(buckets: Buckets, targets: dict[str, int],
+                      max_per_cluster: int) -> list:
     selected = []
 
-    # trips: distribute across trips proportionally to size
+    # trips: distribute across trips proportionally to size, capped per trip
     trips_target = targets["trips"]
     if buckets.trips and trips_target:
         sizes = [len(c.photos) for c in buckets.trips]
         total_trip = sum(sizes)
         for c, sz in zip(buckets.trips, sizes):
             n = max(1, round(trips_target * sz / total_trip))
+            n = min(n, max_per_cluster)
             selected.extend(select_top(c.photos, n))
 
-    # holidays: distribute proportionally across distinct holidays
+    # holidays: distribute proportionally across distinct holidays, capped
     holiday_target = targets["holidays"]
     if buckets.holidays and holiday_target:
-        # group by base name (drop eve marker)
         by_base = defaultdict(list)
         for label, lst in buckets.holidays.items():
             base = label.replace(" (eve)", "")
@@ -384,9 +385,10 @@ def pick_from_buckets(buckets: Buckets, targets: dict[str, int]) -> list:
         total_h = sum(sizes.values())
         for k, lst in by_base.items():
             n = max(1, round(holiday_target * sizes[k] / total_h))
+            n = min(n, max_per_cluster)
             selected.extend(select_top(lst, n))
 
-    # events: take from biggest clusters first
+    # events: take from biggest clusters first, capped per cluster
     event_target = targets["events"]
     if buckets.events and event_target:
         sorted_events = sorted(buckets.events, key=lambda c: -len(c.photos))
@@ -395,7 +397,7 @@ def pick_from_buckets(buckets: Buckets, targets: dict[str, int]) -> list:
         for c in sorted_events:
             if remaining <= 0:
                 break
-            n = min(per_event, remaining)
+            n = min(per_event, remaining, max_per_cluster)
             selected.extend(select_top(c.photos, n))
             remaining -= n
 
@@ -412,6 +414,78 @@ def pick_from_buckets(buckets: Buckets, targets: dict[str, int]) -> list:
             seen.add(p.uuid)
             final.append(p)
     return final
+
+
+def topup_to_budget(selected: list, all_in_range: list, target: int) -> list:
+    """If max-per-cluster left us short of the budget, fill from the highest
+    -quality unselected photos in the date range."""
+    if len(selected) >= target:
+        return selected
+    have = {p.uuid for p in selected}
+    extras = sorted(
+        (p for p in all_in_range if p.uuid not in have),
+        key=quality, reverse=True,
+    )
+    return selected + extras[: target - len(selected)]
+
+
+def named_persons(photo) -> list[str]:
+    return [n for n in (photo.persons or []) if n and not n.startswith("_")]
+
+
+def rebalance_persons(selected: list, all_in_range: list,
+                      target: int, max_share: float) -> list:
+    """Swap dominating-person photos for under-represented ones.
+
+    For any named person appearing in more than `max_share * target` of the
+    selection, drop their lowest-quality photo and swap in the highest-quality
+    unselected photo that doesn't include them. Continues until no person
+    crosses the threshold or no replacement candidate is left.
+    """
+    if max_share <= 0 or target <= 0 or not selected:
+        return selected
+
+    selected = list(selected)
+    selected_uuids = {p.uuid for p in selected}
+    pool = sorted(
+        (p for p in all_in_range if p.uuid not in selected_uuids),
+        key=quality, reverse=True,
+    )
+
+    threshold = int(target * max_share)
+    swaps = 0
+
+    while True:
+        counts = Counter()
+        for p in selected:
+            for n in named_persons(p):
+                counts[n] += 1
+        over = [(name, c) for name, c in counts.items() if c > threshold]
+        if not over:
+            break
+        over_name, _ = max(over, key=lambda x: x[1])
+
+        drop_idx = min(
+            (i for i, p in enumerate(selected) if over_name in named_persons(p)),
+            key=lambda i: quality(selected[i]),
+            default=None,
+        )
+        if drop_idx is None:
+            break
+
+        repl_idx = next(
+            (i for i, p in enumerate(pool) if over_name not in named_persons(p)),
+            None,
+        )
+        if repl_idx is None:
+            break  # no replacement candidates left
+
+        selected[drop_idx] = pool.pop(repl_idx)
+        swaps += 1
+
+    if swaps:
+        print(f"Person balance: swapped {swaps} photos to reduce dominance.")
+    return selected
 
 
 def trim_to_budget(selected: list, total: int) -> list:
@@ -445,6 +519,15 @@ def main():
     ap.add_argument("--holidays", default="se",
                     help="Country codes for holiday detection, comma-separated. "
                          "Examples: se, us, se,us. Use 'none' to disable.")
+    ap.add_argument("--max-per-cluster", type=int, default=6,
+                    help="Cap on how many photos one trip/event/holiday can "
+                         "contribute. Prevents a single 200-photo wedding "
+                         "from dominating the selection. Default: 6")
+    ap.add_argument("--person-balance", type=float, default=0.40,
+                    metavar="SHARE",
+                    help="Maximum share of the final selection any single "
+                         "named person may appear in (0.0–1.0). Set to 0 to "
+                         "disable. Default: 0.40")
     ap.add_argument("--dry-run", action="store_true",
                     help="Show discovery + selection plan without creating an album")
     args = ap.parse_args()
@@ -473,8 +556,10 @@ def main():
     print_plan(targets, buckets)
 
     # Select
-    selected = pick_from_buckets(buckets, targets)
+    selected = pick_from_buckets(buckets, targets, args.max_per_cluster)
+    selected = topup_to_budget(selected, photos, args.count)
     selected = trim_to_budget(selected, args.count)
+    selected = rebalance_persons(selected, photos, args.count, args.person_balance)
     print(f"\nFinal selection: {len(selected)} photos")
 
     if args.dry_run:
