@@ -138,7 +138,8 @@ def split_by_time_gap(photos: list, gap_hours: float = 6.0) -> list[list]:
 
 def detect_trips(photos: list, home: tuple[float, float] | None,
                  min_dist_km: float = 50.0,
-                 min_trip_size: int = 8) -> list[Cluster]:
+                 min_trip_size: int = 8,
+                 min_named_persons: int = 2) -> list[Cluster]:
     if not home:
         return []
     away = [p for p in photos
@@ -149,6 +150,17 @@ def detect_trips(photos: list, home: tuple[float, float] | None,
     for group in split_by_time_gap(away, gap_hours=24):
         if len(group) < min_trip_size:
             continue
+        # Trip must include at least min_named_persons distinct tagged faces
+        # across all its photos (filters out hospital visits, work conferences,
+        # solo errands, etc. when we want a family yearbook).
+        if min_named_persons > 0:
+            named: set[str] = set()
+            for p in group:
+                for n in (p.persons or []):
+                    if n and not n.startswith("_"):
+                        named.add(n)
+            if len(named) < min_named_persons:
+                continue
         # Try to label with most common place name
         names = Counter(p.place.name for p in group if p.place and p.place.name)
         label = names.most_common(1)[0][0] if names else "Trip"
@@ -187,10 +199,11 @@ class Buckets:
 
 
 def is_yearbook_worthy(p, allow_videos: bool, allow_screenshots: bool,
-                       allow_no_camera: bool) -> bool:
+                       allow_no_camera: bool, allow_no_gps: bool) -> bool:
     """Filter out content that doesn't belong in a printable yearbook:
     videos (don't render in books), screenshots (Pokemon/UI captures),
-    and photos with no camera info (downloaded images, web saves)."""
+    photos with no camera info (downloaded images, web saves), and photos
+    without geolocation (anchorless, weak yearbook material)."""
     if getattr(p, "ismovie", False) and not allow_videos:
         return False
     if getattr(p, "screenshot", False) and not allow_screenshots:
@@ -199,14 +212,20 @@ def is_yearbook_worthy(p, allow_videos: bool, allow_screenshots: bool,
         cam = p.exif_info.camera_make if p.exif_info else None
         if not cam:
             return False
+    if not allow_no_gps:
+        loc = p.location
+        if not loc or loc[0] is None or loc[1] is None:
+            return False
     return True
 
 
 def bucket_photos(photos: list, holiday_map: dict[date, str],
-                  min_trip_size: int = 8) -> Buckets:
+                  min_trip_size: int = 8,
+                  min_trip_persons: int = 2) -> Buckets:
     home = home_centroid(photos)
     b = Buckets()
-    b.trips = detect_trips(photos, home, min_trip_size=min_trip_size)
+    b.trips = detect_trips(photos, home, min_trip_size=min_trip_size,
+                           min_named_persons=min_trip_persons)
     trip_uuids = {p.uuid for c in b.trips for p in c.photos}
 
     non_trip = [p for p in photos if p.uuid not in trip_uuids]
@@ -662,6 +681,16 @@ def main():
     ap.add_argument("--include-no-camera", action="store_true",
                     help="Include photos lacking EXIF camera info: "
                          "downloads, web saves, etc. (excluded by default).")
+    ap.add_argument("--include-no-gps", action="store_true",
+                    help="Include photos without geolocation. By default "
+                         "non-geotagged photos are excluded — they make "
+                         "weaker yearbook anchors.")
+    ap.add_argument("--min-trip-persons", type=int, default=2,
+                    help="A 'trip' must contain at least this many distinct "
+                         "named (tagged) people across all its photos. "
+                         "Excludes hospital visits, solo work conferences, "
+                         "and similar non-family travel. Default: 2. "
+                         "Set to 0 to disable.")
     ap.add_argument("--keep-per-scene", type=int, default=2,
                     help="Cap on photos from the same (date, ~1km area). "
                          "Catches dense scenes that pHash misses (e.g. a "
@@ -701,11 +730,12 @@ def main():
     photos = [
         p for p in raw_photos
         if is_yearbook_worthy(p, args.include_videos,
-                              args.include_screenshots, args.include_no_camera)
+                              args.include_screenshots, args.include_no_camera,
+                              args.include_no_gps)
     ]
     dropped = len(raw_photos) - len(photos)
     if dropped:
-        print(f"  filtered out {dropped} videos / screenshots / no-camera "
+        print(f"  filtered out {dropped} videos / screenshots / no-camera / no-gps "
               f"({len(photos)} remain)")
 
     # Holidays
@@ -717,7 +747,9 @@ def main():
         holiday_map = expand_holidays(codes, years)
 
     # Bucket + plan
-    buckets = bucket_photos(photos, holiday_map, min_trip_size=args.min_trip_size)
+    buckets = bucket_photos(photos, holiday_map,
+                            min_trip_size=args.min_trip_size,
+                            min_trip_persons=args.min_trip_persons)
     print_discovery(photos, buckets)
     targets = allocate(buckets, args.count)
     print_plan(targets, buckets)
