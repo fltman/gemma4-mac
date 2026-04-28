@@ -391,7 +391,9 @@ def print_discovery(photos: list, buckets: Buckets):
     if buckets.trips:
         print(f"\nTrips ({len(buckets.trips)}):")
         for c in buckets.trips:
-            print(f"  {c.start.date()}–{c.end.date()}  {c.label} ({len(c.photos)} photos)")
+            named = trip_named_persons(c)
+            print(f"  {c.start.date()}–{c.end.date()}  {c.label} "
+                  f"({len(c.photos)} photos, {len(named)} faces)")
 
     if buckets.holidays:
         print(f"\nHolidays ({sum(len(v) for v in buckets.holidays.values())} photos):")
@@ -436,6 +438,29 @@ def print_plan(targets: dict[str, int], buckets: Buckets):
 # Selection per bucket
 # --------------------------------------------------------------------------
 
+def trip_named_persons(cluster) -> set[str]:
+    """Distinct tagged-person names across all photos of a trip."""
+    out: set[str] = set()
+    for p in cluster.photos:
+        for n in (p.persons or []):
+            if n and not n.startswith("_"):
+                out.add(n)
+    return out
+
+
+def trip_significance(cluster) -> float:
+    """Weight a trip by length × tagged-people-count (capped).
+
+    Used to apportion the trip budget: a 40-photo family trip with 5
+    tagged faces ranks much higher than a 20-photo solo trip, but not
+    so high that 10-person trips swallow the whole budget. Persons cap
+    at 6 to keep the scale bounded; size is taken raw.
+    """
+    size = len(cluster.photos)
+    persons = max(1, min(len(trip_named_persons(cluster)), 6))
+    return size * persons
+
+
 def select_with_day_spread(photos: list, n: int) -> list:
     """Distribute `n` picks proportionally across the distinct dates, then
     take top-quality (with pHash dedup) within each date.
@@ -468,14 +493,14 @@ def pick_from_buckets(buckets: Buckets, targets: dict[str, int],
                       max_per_cluster: int, max_per_trip: int) -> list:
     selected = []
 
-    # trips: distribute across trips proportionally, capped per trip,
-    # picks spread across the trip's days
+    # trips: weight each trip by size × tagged-people, distribute the
+    # trip budget proportionally, then pick across the trip's days
     trips_target = targets["trips"]
     if buckets.trips and trips_target:
-        sizes = [len(c.photos) for c in buckets.trips]
-        total_trip = sum(sizes)
-        for c, sz in zip(buckets.trips, sizes):
-            n = max(1, round(trips_target * sz / total_trip))
+        weights = [trip_significance(c) for c in buckets.trips]
+        total_w = sum(weights) or 1
+        for c, w in zip(buckets.trips, weights):
+            n = max(1, round(trips_target * w / total_w))
             n = min(n, max_per_trip)
             selected.extend(select_with_day_spread(c.photos, n))
 
@@ -735,11 +760,13 @@ def main():
                     help="Cap on how many photos one event or holiday can "
                          "contribute. Prevents a single 200-photo wedding "
                          "from dominating the selection. Default: 6")
-    ap.add_argument("--max-per-trip", type=int, default=15,
-                    help="Cap on how many photos one trip can contribute. "
-                         "Trips are family events of higher significance, "
-                         "so they get a larger ceiling than ordinary "
-                         "clusters. Default: 15")
+    ap.add_argument("--max-per-trip", type=int, default=20,
+                    help="Upper bound on how many photos one trip can "
+                         "contribute. The actual share is computed from "
+                         "trip size × tagged-people count, distributed "
+                         "across all detected trips. This flag is the "
+                         "ceiling; a small or low-people trip won't reach "
+                         "it. Default: 20")
     ap.add_argument("--person-balance", type=float, default=0.40,
                     metavar="SHARE",
                     help="Maximum share of the final selection any single "
