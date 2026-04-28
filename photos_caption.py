@@ -179,26 +179,34 @@ def parse_response(text: str) -> tuple[str, list[str]]:
 def analyze_image(
     model, processor, config, image_path: Path, prompt: str,
     context: str | None = None, explicit_context: bool = False,
+    existing_caption: str | None = None,
 ) -> tuple[str, list[str]]:
     from mlx_vlm import generate
     from mlx_vlm.prompt_utils import apply_chat_template
 
+    parts = []
     if context and explicit_context:
-        full_prompt = (
+        parts.append(
             "Kontext för bilden:\n"
             f"{context}\n\n"
             "Väv in plats, datum (eller månad/år) och eventuella personnamn "
             "från kontexten naturligt i CAPTION. Använd ENDAST de namn som "
-            "är listade ovan — beskriv andra personer anonymt.\n\n"
-            f"{prompt}"
+            "är listade ovan — beskriv andra personer anonymt."
         )
     elif context:
-        full_prompt = (
+        parts.append(
             "Kontext för bilden (använd endast om relevant för det du ser):\n"
-            f"{context}\n\n{prompt}"
+            f"{context}"
         )
-    else:
-        full_prompt = prompt
+    if existing_caption:
+        parts.append(
+            "Befintlig caption (använd som vägledning vid tveksamma detaljer "
+            "— t.ex. specifika bilmärken, platser eller namn som är svåra att "
+            "se i bilden — men korrigera tydliga fel):\n"
+            f"{existing_caption}"
+        )
+    parts.append(prompt)
+    full_prompt = "\n\n".join(parts)
     formatted = apply_chat_template(processor, config, full_prompt, num_images=1)
     result = generate(
         model, processor, formatted,
@@ -219,6 +227,10 @@ def main():
                     help="Skip keywords (only set caption)")
     ap.add_argument("--replace-keywords", action="store_true",
                     help="Overwrite existing keywords (default: merge)")
+    ap.add_argument("--replace-caption", action="store_true",
+                    help="Ignore the existing caption when generating a new "
+                         "one. Default: pass it to the model as a hint to "
+                         "help disambiguate details (e.g. specific car brands).")
     ap.add_argument("--style", default=DEFAULT_STYLE,
                     help="Tone/style for the caption (e.g. 'poetisk, två rader')")
     ap.add_argument("--prompt", default=None,
@@ -260,14 +272,17 @@ def main():
     for i, pid in enumerate(ids, 1):
         try:
             img = find_local_path(db, pid)
+            photo = db.get_photo(pid.split("/")[0])
             context = None
-            if not args.no_context:
-                photo = db.get_photo(pid.split("/")[0])
-                if photo:
-                    context = build_context_block(photo)
+            if not args.no_context and photo:
+                context = build_context_block(photo)
+            existing_caption = None
+            if not args.replace_caption and photo and photo.description:
+                existing_caption = photo.description.strip() or None
             caption, keywords = analyze_image(
                 model, processor, config, img, prompt,
                 context=context, explicit_context=args.explicit_context,
+                existing_caption=existing_caption,
             )
 
             lines = [f"  [{i}/{len(ids)}]"]
