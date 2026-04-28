@@ -41,8 +41,11 @@ keyword behaviour merges with existing tags (no duplicates, nothing lost).
 ```bash
 git clone https://github.com/fltman/gemma4-mac.git
 cd gemma4-mac
-./install.sh
+./install.command
 ```
+
+…or just **double-click `install.command` in Finder**. The `.command`
+extension makes the same script Finder-runnable; no terminal required.
 
 The installer:
 
@@ -77,7 +80,7 @@ In interactive mode: `/reset` clears history, `Ctrl-D` exits.
 
 1. Open Photos.app
 2. Select one or more photos (Cmd-click for multi-select)
-3. Run:
+3. Either **double-click `gemma-photos.command`** or run from a terminal:
 
 ```bash
 gemma-photos --dry-run             # see what it would write, without touching anything
@@ -85,11 +88,16 @@ gemma-photos                        # set caption + merge keywords
 gemma-photos --no-caption           # only keywords
 gemma-photos --no-keywords          # only caption
 gemma-photos --replace-keywords     # overwrite existing keywords (default merges)
+gemma-photos --replace-caption      # ignore the existing caption (default uses it as a hint)
 gemma-photos --explicit-context     # weave date, place, and named people into the caption
 gemma-photos --no-context           # ignore Photos metadata entirely
 gemma-photos --style "poetic, two-line haiku"
 gemma-photos --prompt "FULL CUSTOM PROMPT — must still emit CAPTION: and KEYWORDS: lines"
 ```
+
+By default the photo's existing caption is fed to the model as a hint —
+useful when humans got a detail right that the vision model gets wrong
+(e.g. specific car brands). Use `--replace-caption` for a clean re-pass.
 
 ## `gemma-yearbook` — auto-curate a year in photos
 
@@ -97,6 +105,9 @@ Picks a balanced, deduplicated selection of photos from a date range and
 creates a new album in Photos.app. The selection uses **Apple's own
 per-photo aesthetic scores** (the same ones that drive the "Memories"
 feature, read via osxphotos) for ranking — no extra ML pass needed.
+
+Either **double-click `gemma-yearbook.command`** (uses defaults — 100 picks
+from the current year) or run from a terminal:
 
 ```bash
 gemma-yearbook --year 2024                                   # default: 100 photos, album "Yearbook 2024"
@@ -226,12 +237,17 @@ keeping it stable is safer.
 
 `gemma-photos` reads the **local preview derivative** straight from the
 Photos library (via [osxphotos](https://github.com/RhetTbull/osxphotos))
-rather than asking Photos.app to export the original. Two reasons:
+rather than asking Photos.app to export the original. Three reasons:
 
 1. **iCloud-only photos work.** With *Optimise Mac Storage* enabled, most
    originals live in iCloud and aren't on disk — but the previews are. So
    we can analyse cloud-only items without forcing slow downloads.
-2. **Originals add no value here.** Gemma's vision encoder resizes to ~768px
+2. **iMessage attachments work.** Photos shared via iMessage live as their
+   own AppleScript class (`«IPmi»`) and refuse to export through the normal
+   API. Their preview derivatives, however, sit in
+   `Photos Library/scopes/syndication/resources/derivatives/` and load fine
+   — so they're handled the same way as any other photo.
+3. **Originals add no value here.** Gemma's vision encoder resizes to ~768px
    internally, so the difference between a 4032×3024 HEIC original and an
    1080×1920 preview vanishes after preprocessing.
 
@@ -271,8 +287,10 @@ quality, more RAM) or `mlx-community/gemma-4-e2b-it-4bit` (smaller, faster).
 
 ## Uninstall
 
+Double-click `uninstall.command` in Finder, or:
+
 ```bash
-./uninstall.sh
+./uninstall.command
 ```
 
 Removes the alias block from `~/.zshrc` and (with confirmation) the local

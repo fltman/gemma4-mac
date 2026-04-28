@@ -104,4 +104,6 @@ echo "  ${BOLD}gemma${RESET} 'hej, vem är du?'"
 echo "  ${BOLD}gemma${RESET} -i path/to/photo.jpg 'beskriv vad du ser'"
 echo "  ${BOLD}gemma-photos${RESET} --dry-run    # after selecting photos in Photos.app"
 echo
+echo "Or double-click ${BOLD}gemma-photos.command${RESET} / ${BOLD}gemma-yearbook.command${RESET} in Finder."
+echo
 echo "First run will download the model (~3.5 GB) from Hugging Face."
