@@ -47,11 +47,13 @@ cd gemma4-mac
 The installer:
 
 1. Verifies Apple Silicon + Python ≥ 3.10
-2. Creates `./venv` and installs `mlx-lm` (from git main; PyPI lags behind on
-   new architectures) and `mlx-vlm`
-3. Generates `bin/gemma` and `bin/gemma-photos` wrapper scripts
-4. Adds two aliases to `~/.zshrc` inside an idempotent `# >>> gemma-mlx >>>`
-   block
+2. Creates `./venv` and installs Python deps: `mlx-lm` (from git main —
+   PyPI lags behind on new architectures), `mlx-vlm`, `osxphotos`,
+   `pillow-heif`, `holidays`, `imagehash`
+3. Generates `bin/gemma`, `bin/gemma-photos` and `bin/gemma-yearbook`
+   wrapper scripts
+4. Adds three aliases to `~/.zshrc` inside an idempotent
+   `# >>> gemma-mlx >>>` block
 
 Open a new terminal (or `source ~/.zshrc`) and you're done.
 
@@ -91,38 +93,109 @@ gemma-photos --prompt "FULL CUSTOM PROMPT — must still emit CAPTION: and KEYWO
 
 ## `gemma-yearbook` — auto-curate a year in photos
 
-Picks a balanced selection of photos from a date range and creates a new
-album in Photos.app. Uses **Apple's own per-photo aesthetic scores** (the
-same ones that drive the "Memories" feature, exposed via osxphotos) to rank
-candidates — no extra ML pass needed for quality, just for captioning.
+Picks a balanced, deduplicated selection of photos from a date range and
+creates a new album in Photos.app. The selection uses **Apple's own
+per-photo aesthetic scores** (the same ones that drive the "Memories"
+feature, read via osxphotos) for ranking — no extra ML pass needed.
 
 ```bash
-gemma-yearbook --year 2024                              # default: 100 photos, album "Yearbook 2024"
+gemma-yearbook --year 2024                                   # default: 100 photos, album "Yearbook 2024"
 gemma-yearbook --year 2024 --count 50 --album "Best of '24"
-gemma-yearbook --from 2024-06-01 --to 2024-08-31         # custom date range
-gemma-yearbook --year 2024 --dry-run                     # report only, don't touch Photos
-gemma-yearbook --year 2024 --holidays se,us              # include US holidays too
-gemma-yearbook --year 2024 --holidays none               # ignore the holiday calendar
+gemma-yearbook --from 2024-06-01 --to 2024-08-31              # custom date range
+gemma-yearbook --year 2024 --dry-run                          # report only, don't touch Photos
+gemma-yearbook --year 2024 --holidays se,us                   # include US holidays too
+gemma-yearbook --year 2024 --holidays none                    # ignore the holiday calendar
 ```
 
-What happens:
+### How the selection works
 
-1. **Discovery** — reads all photos in the range, then groups them into:
-   - **Trips** (≥5 photos taken ≥50 km from your geographic median, in
-     bursts of >24h gaps)
-   - **Holidays** (matching dates from the `holidays` Python library plus
-     the day before for "eve" celebrations like Julafton)
-   - **Event clusters** (≥8 photos within ~4 hours, ≤18h total)
-   - **Everyday** (everything else)
-2. **Budget split** — defaults to 35% trips, 25% events, 20% holidays, 20%
-   everyday. Empty buckets redistribute to the rest.
-3. **Per-bucket ranking** — Apple's `score.overall - score.failure`, plus
-   bonuses for `well_framed_subject` and `sharply_focused_subject`. Within
-   each 30-second burst, only the top-scored photo survives.
-4. **Album** — creates a new top-level album in Photos and adds the picks.
+The pipeline runs in this fixed order, narrowing ~2,000 candidate photos
+down to the requested `--count`:
 
-The discovery report prints up-front, so `--dry-run` lets you sanity-check
-the buckets and budget before committing.
+**1. Hard filters** (drops ~60–70% of the raw input)
+Default exclusions: videos, screenshots, photos lacking EXIF camera info,
+and photos without geolocation. Each can be opted back in
+(`--include-videos`, `--include-screenshots`, `--include-no-camera`,
+`--include-no-gps`).
+
+**2. Bucketing** — every remaining photo lands in exactly one bucket:
+- **Trips** — ≥`min_trip_size` photos taken ≥50 km from the year's
+  geographic median, separated from other photo activity by ≥24h, **and
+  containing at least `min_trip_persons` distinct tagged faces** across
+  the whole trip. The face requirement is what separates a family
+  vacation from a hospital visit, work conference or solo errand.
+- **Holidays** — date matches the country's holiday calendar (via the
+  Python `holidays` library), plus the *day before* so eves like
+  Julafton, Midsommarafton and Nyårsafton are captured. Generic Sunday
+  labels are filtered out.
+- **Events** — dense time clusters: ≥8 photos within a ~4-hour window,
+  total span ≤18h.
+- **Everyday** — the long tail.
+
+**3. Budget split** — defaults to 35% trips, 25% events, 20% holidays,
+20% everyday. Empty buckets redistribute to the rest.
+
+**4. Per-bucket selection** — different strategy per bucket type:
+- **Trips** are weighted by `size × min(named_faces, 6)`. The trip budget
+  is divided proportionally to that weight, so a 40-photo family trip
+  ranks above a 40-photo solo conference. Within each trip, picks are
+  spread proportionally across the trip's distinct dates so a 5-day trip
+  doesn't collapse to its single most photogenic afternoon. Capped at
+  `--max-per-trip` (default 20).
+- **Holidays** distribute proportionally across distinct holidays,
+  capped at `--max-per-cluster` (default 6).
+- **Events** are taken from the largest clusters first, capped at
+  `--max-per-cluster`.
+- **Everyday** is straight top-N by quality.
+
+  Within each bucket, candidates are ranked by quality:
+  `score.overall − score.failure + 0.5·curation + 0.2·well_framed_subject
+  + 0.1·sharply_focused_subject`.
+
+**5. Dedup, in two passes** —
+- **Scene dedup** (`--keep-per-scene`, default 2): groups photos by
+  `(date, ~1km area)` and keeps only the top-N by quality from each
+  group. This is the main weapon against passport-photo sessions and
+  similar dense scenes — pHash is too coarse for "same wall, different
+  pose".
+- **pHash dedup** (`--similarity-threshold`, default 14): perceptual
+  hash skips near-identical compositions that landed in different
+  buckets. Secondary safety net.
+
+**6. Topup to budget** — if scene dedup undershot the count, fills back
+up from the year's highest-quality remaining photos, respecting both the
+scene cap and the pHash threshold so duplicates aren't reintroduced.
+
+**7. Trim to budget** — if the count is still over, drops the lowest-
+quality photos.
+
+**8. Person balance** (`--person-balance`, default 0.40) — if any tagged
+person appears in more than 40% of the selection, swap their lowest-
+quality photos for the year's best photos that don't include them
+(dedup-aware). Set to 0 to disable.
+
+**9. Album** — creates a new top-level album in Photos.app and adds the
+picks via AppleScript.
+
+The discovery report prints up-front, so `--dry-run` lets you sanity-
+check the buckets and budget before committing to writes.
+
+### Yearbook flag reference
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--count` | 100 | Number of photos in the album |
+| `--album` | `Yearbook YYYY` | Album name |
+| `--holidays` | `se` | Country codes for holiday detection (e.g. `se,us`), or `none` |
+| `--keep-per-scene` | 2 | Max per (date, ~1km area). Lower = stricter |
+| `--similarity-threshold` | 14 | pHash distance cutoff (lower = stricter dedup) |
+| `--max-per-cluster` | 6 | Cap per single event/holiday |
+| `--max-per-trip` | 20 | Cap per single trip (trips get more headroom than events) |
+| `--min-trip-size` | 8 | Photos required to qualify as a trip |
+| `--min-trip-persons` | 2 | Distinct tagged faces required to qualify as a trip |
+| `--person-balance` | 0.40 | Max share of selection any one person may appear in. 0 disables |
+| `--include-videos`, `--include-screenshots`, `--include-no-camera`, `--include-no-gps` | off | Re-enable filtered content |
+| `--dry-run` | off | Print plan without creating an album |
 
 ### Photos metadata as context
 
