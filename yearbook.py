@@ -436,19 +436,48 @@ def print_plan(targets: dict[str, int], buckets: Buckets):
 # Selection per bucket
 # --------------------------------------------------------------------------
 
+def select_with_day_spread(photos: list, n: int) -> list:
+    """Distribute `n` picks proportionally across the distinct dates, then
+    take top-quality (with pHash dedup) within each date.
+
+    Without this a 5-day trip with one photogenic afternoon collapses to
+    that single afternoon, missing the rest of the trip entirely.
+    """
+    if n <= 0 or not photos:
+        return []
+    by_day: dict = defaultdict(list)
+    for p in photos:
+        d = p.date.date() if p.date else None
+        by_day[d].append(p)
+    days = sorted(by_day.keys(), key=lambda d: (d is None, d))
+    sizes = [len(by_day[d]) for d in days]
+    total = sum(sizes)
+    out: list = []
+    remaining = n
+    for d, sz in zip(days, sizes):
+        if remaining <= 0:
+            break
+        share = max(1, round(n * sz / total))
+        share = min(share, remaining)
+        out.extend(select_top(by_day[d], share))
+        remaining -= share
+    return out
+
+
 def pick_from_buckets(buckets: Buckets, targets: dict[str, int],
-                      max_per_cluster: int) -> list:
+                      max_per_cluster: int, max_per_trip: int) -> list:
     selected = []
 
-    # trips: distribute across trips proportionally to size, capped per trip
+    # trips: distribute across trips proportionally, capped per trip,
+    # picks spread across the trip's days
     trips_target = targets["trips"]
     if buckets.trips and trips_target:
         sizes = [len(c.photos) for c in buckets.trips]
         total_trip = sum(sizes)
         for c, sz in zip(buckets.trips, sizes):
             n = max(1, round(trips_target * sz / total_trip))
-            n = min(n, max_per_cluster)
-            selected.extend(select_top(c.photos, n))
+            n = min(n, max_per_trip)
+            selected.extend(select_with_day_spread(c.photos, n))
 
     # holidays: distribute proportionally across distinct holidays, capped
     holiday_target = targets["holidays"]
@@ -703,9 +732,14 @@ def main():
                          "picked one are skipped. Lower = stricter dedup. "
                          "Default: 12")
     ap.add_argument("--max-per-cluster", type=int, default=6,
-                    help="Cap on how many photos one trip/event/holiday can "
+                    help="Cap on how many photos one event or holiday can "
                          "contribute. Prevents a single 200-photo wedding "
                          "from dominating the selection. Default: 6")
+    ap.add_argument("--max-per-trip", type=int, default=15,
+                    help="Cap on how many photos one trip can contribute. "
+                         "Trips are family events of higher significance, "
+                         "so they get a larger ceiling than ordinary "
+                         "clusters. Default: 15")
     ap.add_argument("--person-balance", type=float, default=0.40,
                     metavar="SHARE",
                     help="Maximum share of the final selection any single "
@@ -755,7 +789,8 @@ def main():
     print_plan(targets, buckets)
 
     # Select
-    selected = pick_from_buckets(buckets, targets, args.max_per_cluster)
+    selected = pick_from_buckets(buckets, targets,
+                                 args.max_per_cluster, args.max_per_trip)
     before = len(selected)
     selected = scene_dedup(selected, args.keep_per_scene)
     if len(selected) < before:
